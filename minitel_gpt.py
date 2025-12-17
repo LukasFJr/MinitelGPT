@@ -743,23 +743,39 @@ def run_serial_autoconfig(debug: bool = False) -> Optional[Dict[str, Any]]:
 # Fonctions d'affichage Minitel
 # ============================================================================
 
+class MinitelPaginator:
+    """Gère le comptage de lignes et la pagination pour un périphérique Minitel."""
+
+    def __init__(self, minitel, page_lines: int = PAGE_LINES):
+        self.minitel = minitel
+        self.page_lines = page_lines
+        self.line_count = 0
+
+    def writeln(self, line: str = "") -> bool:
+        """
+        Écrit une ligne et gère la pagination si nécessaire.
+
+        Retourne True si une pause de pagination a été déclenchée.
+        """
+        self.minitel.writeln(line)
+        self.line_count += 1
+        if self.minitel.is_pagination_enabled() and self.line_count >= self.page_lines:
+            self.minitel.writeln()
+            self.minitel.write("-- suite (touche) --")
+            self.minitel.wait_keypress(timeout=300)
+            self.minitel.write("\r" + " " * 22 + "\r")
+            self.line_count = 0
+            return True
+        return False
+
+
 def display_wrapped(minitel, text: str, page_lines: int = PAGE_LINES):
     """Affiche du texte avec wrap à 40 colonnes et pagination."""
     lines = wrap_40(text, WRAP_COLS)
-    line_count = 0
+    paginator = MinitelPaginator(minitel, page_lines)
 
     for line in lines:
-        minitel.writeln(line)
-        line_count += 1
-
-        # Pagination
-        if minitel.is_pagination_enabled() and line_count >= page_lines:
-            minitel.writeln()
-            minitel.write("-- suite (touche) --")
-            minitel.wait_keypress(timeout=300)
-            # Effacer le message "suite"
-            minitel.write("\r" + " " * 22 + "\r")
-            line_count = 0
+        paginator.writeln(line)
 
 
 def display_streaming(minitel, text_generator: Generator[str, None, None],
@@ -771,7 +787,7 @@ def display_streaming(minitel, text_generator: Generator[str, None, None],
     """
     full_text = ""
     buffer = ""
-    line_count = 0
+    paginator = MinitelPaginator(minitel, page_lines)
     current_line_len = 0
 
     for chunk in text_generator:
@@ -799,37 +815,17 @@ def display_streaming(minitel, text_generator: Generator[str, None, None],
                             minitel.write(remaining)
                             current_line_len += len(remaining)
                             break
-                        else:
-                            # Trouver le dernier espace dans la zone disponible
-                            cut_point = remaining[:space_left].rfind(" ")
-                            if cut_point <= 0:
-                                cut_point = space_left
-                            minitel.write(remaining[:cut_point])
-                            minitel.writeln()
-                            line_count += 1
-                            remaining = remaining[cut_point:].lstrip()
-                            current_line_len = 0
-
-                            # Pagination
-                            if minitel.is_pagination_enabled() and line_count >= page_lines:
-                                minitel.writeln()
-                                minitel.write("-- suite (touche) --")
-                                minitel.wait_keypress(timeout=300)
-                                minitel.write("\r" + " " * 22 + "\r")
-                                line_count = 0
+                        cut_point = remaining[:space_left].rfind(" ")
+                        if cut_point <= 0:
+                            cut_point = space_left
+                        minitel.write(remaining[:cut_point])
+                        paginator.writeln()
+                        remaining = remaining[cut_point:].lstrip()
+                        current_line_len = 0
 
                 # Nouvelle ligne
-                minitel.writeln()
-                line_count += 1
+                paginator.writeln()
                 current_line_len = 0
-
-                # Pagination
-                if minitel.is_pagination_enabled() and line_count >= page_lines:
-                    minitel.writeln()
-                    minitel.write("-- suite (touche) --")
-                    minitel.wait_keypress(timeout=300)
-                    minitel.write("\r" + " " * 22 + "\r")
-                    line_count = 0
 
             elif " " in buffer and len(buffer) > 10:
                 # On a assez de texte avec un espace, on peut afficher
@@ -844,22 +840,13 @@ def display_streaming(minitel, text_generator: Generator[str, None, None],
                         minitel.write(segment + " ")
                         current_line_len += len(segment) + 1
                         break
-                    else:
-                        cut_point = segment[:space_left].rfind(" ")
-                        if cut_point <= 0:
-                            cut_point = space_left
-                        minitel.write(segment[:cut_point])
-                        minitel.writeln()
-                        line_count += 1
-                        segment = segment[cut_point:].lstrip()
-                        current_line_len = 0
-
-                        if minitel.is_pagination_enabled() and line_count >= page_lines:
-                            minitel.writeln()
-                            minitel.write("-- suite (touche) --")
-                            minitel.wait_keypress(timeout=300)
-                            minitel.write("\r" + " " * 22 + "\r")
-                            line_count = 0
+                    cut_point = segment[:space_left].rfind(" ")
+                    if cut_point <= 0:
+                        cut_point = space_left
+                    minitel.write(segment[:cut_point])
+                    paginator.writeln()
+                    segment = segment[cut_point:].lstrip()
+                    current_line_len = 0
             else:
                 # Pas assez de texte, attendre plus
                 break
@@ -871,16 +858,15 @@ def display_streaming(minitel, text_generator: Generator[str, None, None],
             if len(buffer) <= space_left:
                 minitel.write(buffer)
                 break
-            else:
-                cut_point = buffer[:space_left].rfind(" ")
-                if cut_point <= 0:
-                    cut_point = space_left
-                minitel.write(buffer[:cut_point])
-                minitel.writeln()
-                buffer = buffer[cut_point:].lstrip()
-                current_line_len = 0
+            cut_point = buffer[:space_left].rfind(" ")
+            if cut_point <= 0:
+                cut_point = space_left
+            minitel.write(buffer[:cut_point])
+            paginator.writeln()
+            buffer = buffer[cut_point:].lstrip()
+            current_line_len = 0
 
-    minitel.writeln()
+    paginator.writeln()
     return full_text
 
 
