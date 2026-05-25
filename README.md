@@ -1,56 +1,43 @@
 # MinitelGPT — ChatGPT sur Minitel (API OpenAI + série)
 
-Un pont **Minitel → Python → API OpenAI → Minitel**.
+Un pont série entre un Minitel 1 (TRT / La Radiotechnique NFZ 201) et l'API OpenAI. Tu tapes un prompt sur le clavier du Minitel, la réponse s'affiche sur l'écran.
 
-Tu tapes un prompt sur un **Minitel 1** (TRT / La Radiotechnique **NFZ 201**),
-la réponse s’affiche directement sur l’écran du Minitel.
-
-👉 Pas de scraping du site ChatGPT : **API OpenAI officielle uniquement**.
+Pas de scraping du site ChatGPT : uniquement l'API officielle OpenAI.
 
 ---
 
-## Ce que ça fait (et ce que ça ne fait pas)
+## Fonctionnalités
 
-### ✅ Fait
+**Ce que le script gère :**
+- Saisie de prompt via le clavier du Minitel (liaison série)
+- Envoi à l'API OpenAI et affichage de la réponse
+- Wrap 40 colonnes, encodage latin-1
+- Retours ligne `\r\n` compatibles Vidéotex
+- Throttling pour éviter la perte de caractères
+- Pagination ("— suite — appuie sur une touche")
+- Auto-configuration série au premier lancement
+- Historique local (`history.json`)
+- Profil système local (`system_profile.txt`) pour personnaliser le style de l'assistant
 
-* Saisie d’un prompt via le clavier du Minitel (liaison série)
-* Envoi du prompt à l’API OpenAI
-* Affichage de la réponse sur le Minitel
-* **Wrap 40 colonnes**, encodage **latin-1**
-* Retours ligne `\r\n` compatibles Vidéotex
-* **Throttling** (évite la perte de caractères)
-* **Pagination** (“— suite — appuie sur une touche”)
-* **Auto-configuration série** au premier lancement
-* Historique local (`history.json`)
-* Profil système local (`system_profile.txt`) pour personnaliser le style
+**Limitations :**
 
-### ❌ Ne fait pas
-
-* Pas de “vraie vidéo”
-* Pas de VT100 / ANSI / terminal moderne
-* Pas d’accès à la *Memory* de ton compte ChatGPT web
-  (l’API n’y a pas accès automatiquement)
+Le script ne fait pas de graphismes Vidéotex, ne prétend pas être un terminal VT100/ANSI, et n'a pas accès à la mémoire de ton compte ChatGPT web (l'API OpenAI et le site web sont deux choses séparées).
 
 ---
 
 ## Matériel requis
 
-* **Minitel 1** première génération
-  (TRT / La Radiotechnique **NFZ 201**)
-* **Câble USB ↔ DIN-5 “spécial Minitel”**
-  (souvent basé sur FTDI)
-* macOS (environnement de test principal)
+- Minitel 1 première génération (TRT / La Radiotechnique NFZ 201)
+- Câble USB ↔ DIN-5 "spécial Minitel" (généralement basé sur FTDI)
+- macOS (environnement de test principal)
 
-> ⚠️ Le Minitel 1 est plus capricieux que les modèles 1B / 2.
-> Le script inclut un assistant d’auto-config, mais certains câbles
-> mal câblés (inversion / niveaux) peuvent poser problème.
+> **Note :** Le Minitel 1 est plus capricieux que les modèles 1B ou 2. Le script inclut un assistant d'auto-configuration, mais certains câbles mal câblés (inversions de signaux ou niveaux incorrects) peuvent rester problématiques même après configuration.
 
 ---
 
 ## Installation (macOS)
 
-### 1) Créer l’environnement Python
-
+**1. Créer l'environnement Python**
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -58,22 +45,17 @@ pip install -U pip
 pip install pyserial openai
 ```
 
-### 2) Ajouter la clé API OpenAI
-
-Méthode recommandée :
-
+**2. Configurer la clé API OpenAI**
 ```bash
 export OPENAI_API_KEY="sk-..."
 ```
 
-### 3) (Optionnel) Lister les ports série
-
+**3. (Optionnel) Lister les ports série disponibles**
 ```bash
 python -m serial.tools.list_ports
 ```
 
-### 4) Lancer le script
-
+**4. Lancer le script**
 ```bash
 python minitel_gpt.py
 ```
@@ -82,121 +64,93 @@ python minitel_gpt.py
 
 ## Premier lancement : auto-configuration série
 
-Au premier lancement (ou via la commande `/reset`), le script :
+Au premier lancement (ou via `/reset`), le script :
 
-1. Liste les ports série (`/dev/cu.usbserial-*`, `/dev/cu.usbmodem*`)
-2. Teste plusieurs configurations (baud + format)
+1. Liste les ports disponibles (`/dev/cu.usbserial-*`, `/dev/cu.usbmodem*`)
+2. Teste plusieurs combinaisons de baud rate et de format
 3. Envoie un écran de test :
-
-   ```
-   TEST 1200 7E1 : SI TU LIS CA, TAPE y PUIS ENTREE
-   ```
-4. Si tu tapes `y` + Entrée, la configuration est validée et sauvegardée dans :
-
 ```
-minitel_config.json
+TEST 1200 7E1 : SI TU LIS CA, TAPE y PUIS ENTREE
 ```
+4. Si tu tapes `y` + Entrée, la config est validée et sauvegardée dans `minitel_config.json`
 
-> Si rien ne s’affiche : laisse tourner, il teste automatiquement
-> toutes les configurations possibles.
+Si rien ne s'affiche, laisse tourner — le script cycle automatiquement à travers toutes les combinaisons possibles.
 
 ---
 
-## Utilisation côté Minitel
+## Utilisation
 
-* Invite : `> `
-* Tape ton prompt
-* Appuie sur **Entrée**
-* Lis la réponse affichée
+L'invite côté Minitel est `> `. Tape ton prompt, appuie sur Entrée, lis la réponse.
 
 ### Commandes disponibles
 
-* `/help` : affiche l’aide
-* `/clear` : efface l’écran (ou faux clear si non supporté)
-* `/quit` : quitter proprement
-* `/reset` : relancer l’assistant série
-* `/model` : changer de modèle (si supporté)
-* `/history_reset` : effacer l’historique local
-* `/debug` : afficher les octets RX côté Mac (debug bas niveau)
+| Commande | Description |
+|---|---|
+| `/help` | Afficher l'aide |
+| `/clear` | Effacer l'écran (ou faux clear si non supporté) |
+| `/quit` | Quitter proprement |
+| `/reset` | Relancer l'assistant de configuration série |
+| `/model` | Changer de modèle (si supporté) |
+| `/history_reset` | Effacer l'historique local |
+| `/debug` | Afficher les octets RX bruts côté Mac (debug bas niveau) |
 
 ---
 
-## Personnalisation (style ChatGPT “perso”, mais local)
+## Personnalisation
 
-L’API OpenAI ne réutilise pas la mémoire du compte web.
-On fait donc simple, propre et stable.
+Pour personnaliser le comportement de l'assistant, crée un fichier `system_profile.txt` à la racine du projet :
 
-### `system_profile.txt`
-
-Crée un fichier `system_profile.txt` à la racine du projet.
-
-Exemple :
-
-```txt
+```
 Tu es un assistant direct, pragmatique, légèrement sarcastique si utile.
 Réponds en français.
 Pas de blabla.
 Tu parles à Lukas.
 ```
 
-Ce fichier est injecté comme **message système** à chaque requête.
-
-### Historique local
-
-* Fichier : `history.json`
-* Permet de conserver un contexte entre les sessions
-* Stockage local uniquement
+Ce fichier est injecté comme message système à chaque requête. L'historique des échanges est stocké dans `history.json` et persiste entre les sessions.
 
 ---
 
 ## Fichiers générés
 
-* `minitel_config.json`
-  → paramètres série, throttling, pagination
-* `history.json`
-  → historique local des échanges
-* `system_profile.txt`
-  → profil utilisateur (optionnel)
+| Fichier | Rôle |
+|---|---|
+| `minitel_config.json` | Paramètres série, throttling, pagination |
+| `history.json` | Historique local des échanges |
+| `system_profile.txt` | Profil utilisateur (optionnel) |
 
-👉 À ajouter au `.gitignore` si le dépôt est public.
-
----
-
-## Dépannage (symptômes → solutions)
-
-### Rien ne s’affiche sur le Minitel
-
-* Vérifie la **prise DIN-5 péri-informatique**
-* Laisse l’auto-config tester toutes les configs
-* Teste un autre port série si plusieurs existent
-* Active `/debug`
-* Si aucun octet RX : câble incompatible ou inversion de niveaux
-
-### Caractères illisibles / hiéroglyphes
-
-* Mauvais format série (`7E1` vs `8N1`)
-* Relancer `/reset`
-
-### Entrée / backspace ne fonctionnent pas
-
-* Active `/debug`
-* Vérifie la réception de `0x08`, `0x7f`, `\r`, `\n`
-* Ajuste le mapping si nécessaire
-
-### Texte qui saute / pertes de caractères
-
-* Augmente le throttling dans `minitel_config.json`
-* Préfère un affichage ligne par ligne
-
-### Double affichage (écho)
-
-* Certains Minitel font de l’écho local
-* Le script doit tolérer ou filtrer l’écho selon le cas
+À ajouter au `.gitignore` si le dépôt est public.
 
 ---
 
-## Roadmap (si tu veux pousser le vice)
+## Dépannage
 
-* UI plus “Vidéotex” (cadres, titres, curseur)
-* Mode multi-lignes plus confortable
-* Mini-apps : météo, RSS, now playing, etc.
+**Rien ne s'affiche sur le Minitel**
+- Vérifie la prise DIN-5 péri-informatique (pas la prise téléphonique)
+- Laisse l'auto-config cycler jusqu'au bout
+- Teste un autre port série si plusieurs sont disponibles
+- Active `/debug` — si aucun octet RX ne remonte, le câble est probablement incompatible ou les niveaux sont inversés
+
+**Caractères illisibles / hiéroglyphes**
+- Mauvais format série (7E1 vs 8N1)
+- Relancer `/reset`
+
+**Entrée / backspace ne fonctionnent pas**
+- Active `/debug` et vérifie la réception de `0x08`, `0x7f`, `\r`, `\n`
+- Ajuster le mapping si nécessaire
+
+**Pertes de caractères / texte qui saute**
+- Augmenter le throttling dans `minitel_config.json`
+- Préférer un affichage ligne par ligne
+
+**Double affichage (écho local)**
+- Certains Minitel font de l'écho local
+- Le script doit tolérer ou filtrer selon le cas
+
+---
+
+## Roadmap
+
+- UI Vidéotex plus complète (cadres, titres, positionnement du curseur)
+- Saisie multi-lignes plus confortable
+- Mini-apps : météo, RSS, now playing, etc.
