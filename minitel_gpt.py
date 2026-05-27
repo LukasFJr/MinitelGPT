@@ -43,6 +43,7 @@ HISTORY_FILE = "history.json"
 SYSTEM_PROFILE_FILE = "system_profile.md"
 MEMORY_FILE = "memory.md"
 CHAT_LOG_FILE = "chat_log.json"
+SESSIONS_FILE = "sessions.json"
 
 # Profil système par défaut si system_profile.md absent
 DEFAULT_SYSTEM_PROMPT = """Tu es un assistant concis et utile.
@@ -187,6 +188,11 @@ class HistoryStore:
             except IOError:
                 pass
 
+    def load_from(self, messages: List[Dict[str, str]]):
+        """Charge depuis une liste externe et applique la troncature."""
+        self.messages = list(messages)
+        self._trim()
+
     def get_messages(self) -> List[Dict[str, str]]:
         return list(self.messages)
 
@@ -242,6 +248,102 @@ class ChatLogStore:
                 return data if isinstance(data, list) else []
         except (json.JSONDecodeError, IOError):
             return []
+
+
+# ============================================================================
+# Classe SessionStore
+# ============================================================================
+
+class SessionStore:
+    """Gère toutes les sessions de chat (sessions.json, messages non tronqués)."""
+
+    def __init__(self, filepath: str = SESSIONS_FILE):
+        self.filepath = Path(filepath)
+        self.sessions: List[Dict] = []
+
+    def load(self):
+        if not self.filepath.exists():
+            self.sessions = []
+            return
+        try:
+            with open(self.filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                self.sessions = data if isinstance(data, list) else []
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"[WARN] Erreur lecture sessions: {e}", file=sys.stderr)
+            self.sessions = []
+
+    def save(self):
+        try:
+            with open(self.filepath, "w", encoding="utf-8") as f:
+                json.dump(self.sessions, f, indent=2, ensure_ascii=False)
+        except IOError as e:
+            print(f"[ERREUR] Impossible de sauvegarder sessions: {e}", file=sys.stderr)
+
+    def create_session(self) -> str:
+        now = datetime.now(timezone.utc)
+        session_id = "sess_" + now.strftime("%Y%m%d_%H%M%S")
+        session = {
+            "id": session_id,
+            "title": "Nouveau chat",
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+            "messages": [],
+        }
+        self.sessions.append(session)
+        self.save()
+        return session_id
+
+    def get_session(self, session_id: str) -> Optional[Dict]:
+        for s in self.sessions:
+            if s.get("id") == session_id:
+                return s
+        return None
+
+    def update_session(self, session_id: str, messages: List[Dict]):
+        for s in self.sessions:
+            if s.get("id") == session_id:
+                s["messages"] = messages
+                s["updated_at"] = datetime.now(timezone.utc).isoformat()
+                for m in messages:
+                    if m["role"] == "user":
+                        s["title"] = m["content"][:30].strip()
+                        break
+                self.save()
+                return
+
+    def list_sessions(self) -> List[Dict]:
+        return sorted(self.sessions, key=lambda s: s.get("updated_at", ""), reverse=True)
+
+    def get_or_create_current(self, session_id: Optional[str]) -> tuple:
+        if session_id:
+            session = self.get_session(session_id)
+            if session:
+                return session["id"], list(session["messages"])
+        new_id = self.create_session()
+        return new_id, []
+
+    def migrate_from_history(self, messages: List[Dict]) -> Optional[str]:
+        """Crée une session depuis l'historique existant si aucune session n'existe."""
+        if self.sessions or not messages:
+            return None
+        now = datetime.now(timezone.utc)
+        session_id = "sess_" + now.strftime("%Y%m%d_%H%M%S")
+        title = "Conversation importee"
+        for m in messages:
+            if m.get("role") == "user":
+                title = m["content"][:30].strip()
+                break
+        session = {
+            "id": session_id,
+            "title": title,
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+            "messages": messages,
+        }
+        self.sessions.append(session)
+        self.save()
+        return session_id
 
 
 # ============================================================================
@@ -1043,6 +1145,8 @@ def show_help(minitel):
 /help    - Cette aide
 /clear   - Effacer ecran
 /quit    - Quitter
+/new     - Nouveau chat
+/chat    - Historique des chats
 /reset   - Reconfigurer serie
 /model   - Voir/changer modele
 /model X - Changer pour X
@@ -1057,7 +1161,7 @@ def show_help(minitel):
 
 def run_shell(minitel, anthropic_client: AnthropicClientWrapper,
               config: ConfigStore, history: HistoryStore,
-              chat_log: ChatLogStore,
+              chat_log: ChatLogStore, session_store: SessionStore,
               debug: bool = False, stream: bool = True):
     """Boucle principale du shell Minitel."""
 
@@ -1066,11 +1170,22 @@ def run_shell(minitel, anthropic_client: AnthropicClientWrapper,
     system_prompt = load_system_prompt_combined()
     debug_rx = debug
 
+    # Initialiser la session courante
+    session_id = config.get("current_session_id")
+    session_id, session_messages = session_store.get_or_create_current(session_id)
+    config.set("current_session_id", session_id)
+    config.save()
+    history.load_from(session_messages)
+
     minitel.clear()
     time.sleep(0.2)
     minitel.writeln("=" * 40)
-    minitel.writeln("  MINITEL-GPT")
-    minitel.writeln("  Tape /help pour les commandes")
+    minitel.writeln("  MINICLAUDE")
+    session = session_store.get_session(session_id)
+    if session and session["messages"]:
+        title_short = sanitize_latin1(session["title"])[:30]
+        minitel.writeln(f"  {title_short}")
+    minitel.writeln("  /help pour les commandes")
     minitel.writeln("=" * 40)
     minitel.writeln()
 
@@ -1130,8 +1245,51 @@ def run_shell(minitel, anthropic_client: AnthropicClientWrapper,
                     if hasattr(minitel, "debug"):
                         minitel.debug = debug_rx
 
+                elif cmd == "/new":
+                    session_id = session_store.create_session()
+                    config.set("current_session_id", session_id)
+                    config.save()
+                    session_messages = []
+                    history.load_from([])
+                    history.save()
+                    minitel.writeln("Nouveau chat.")
+
+                elif cmd == "/chat":
+                    sessions = session_store.list_sessions()
+                    if not sessions:
+                        minitel.writeln("Aucun historique.")
+                    else:
+                        minitel.writeln("=== VOS CHATS ===")
+                        display_sessions = sessions[:9]
+                        for i, s in enumerate(display_sessions, 1):
+                            date_str = s["updated_at"][5:10].replace("-", "/")
+                            title = sanitize_latin1(s["title"])[:31]
+                            marker = "*" if s["id"] == session_id else " "
+                            minitel.writeln(f"{i}{marker} {date_str} {title}")
+                        minitel.writeln()
+                        minitel.write("Choix (ou ENTREE): ")
+                        choice = minitel.read_line(timeout=60, echo=True)
+                        minitel.writeln()
+                        if choice and choice.strip().isdigit():
+                            idx = int(choice.strip()) - 1
+                            if 0 <= idx < len(display_sessions):
+                                selected = display_sessions[idx]
+                                session_id = selected["id"]
+                                session_messages = list(selected["messages"])
+                                config.set("current_session_id", session_id)
+                                config.save()
+                                history.load_from(session_messages)
+                                n = len(session_messages) // 2
+                                title_short = sanitize_latin1(selected["title"])[:20]
+                                minitel.writeln(f"Chat: {title_short}")
+                                minitel.writeln(f"{n} echanges charges.")
+                            else:
+                                minitel.writeln("Choix invalide.")
+
                 elif cmd == "/history_reset":
                     history.reset()
+                    session_messages = []
+                    session_store.update_session(session_id, session_messages)
                     minitel.writeln("Historique efface")
 
                 elif cmd == "/memory":
@@ -1198,6 +1356,11 @@ def run_shell(minitel, anthropic_client: AnthropicClientWrapper,
                 history.add("assistant", response_text, chat_log=chat_log)
                 history.save()
 
+                # Sauvegarder dans la session courante (non tronqué)
+                session_messages.append({"role": "user", "content": user_input})
+                session_messages.append({"role": "assistant", "content": response_text})
+                session_store.update_session(session_id, session_messages)
+
             except Exception as e:
                 minitel.writeln()
                 minitel.writeln("Erreur API. Reessaie.")
@@ -1236,10 +1399,20 @@ def main():
     config = ConfigStore()
     history = HistoryStore()
     chat_log = ChatLogStore()
+    session_store = SessionStore()
 
-    # Charger l'historique et créer les fichiers par défaut
+    # Charger les données et créer les fichiers par défaut
     history.load()
+    session_store.load()
     _ensure_default_files()
+
+    # Migration one-shot : importer history.json dans sessions.json si nécessaire
+    if history.messages and not session_store.sessions:
+        migrated_id = session_store.migrate_from_history(history.messages)
+        if migrated_id:
+            config.load()
+            config.set("current_session_id", migrated_id)
+            config.save()
 
     # Initialiser le client Anthropic
     try:
@@ -1268,10 +1441,11 @@ def main():
             "page_lines": PAGE_LINES,
             "line_delay_ms": 0,
             "last_memory_update": None,
+            "current_session_id": None,
         }
 
         try:
-            run_shell(minitel, anthropic_client, config, history, chat_log,
+            run_shell(minitel, anthropic_client, config, history, chat_log, session_store,
                       debug=args.debug, stream=not args.no_stream)
         except KeyboardInterrupt:
             print("\nAu revoir!")
@@ -1346,7 +1520,7 @@ def main():
 
         try:
             result = run_shell(minitel, anthropic_client, config, history, chat_log,
-                               debug=args.debug, stream=not args.no_stream)
+                               session_store, debug=args.debug, stream=not args.no_stream)
 
             if result == "reset":
                 minitel.close()

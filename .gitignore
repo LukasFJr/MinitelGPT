@@ -29,6 +29,7 @@ ENV/
 minitel_config.json
 history.json
 chat_log.json
+sessions.json
 memory.md
 system_profile.md
 
