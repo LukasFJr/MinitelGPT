@@ -19,6 +19,7 @@ import os
 import sys
 import time
 import textwrap
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Generator, List, Dict, Any
@@ -46,23 +47,22 @@ CHAT_LOG_FILE = "chat_log.json"
 SESSIONS_FILE = "sessions.json"
 
 # Profil système par défaut si system_profile.md absent
+# IMPORTANT: pas d'accents ni de caracteres Unicode -- le Minitel 1 NFZ 201
+# ne supporte que de l'ASCII 7 bits en mode Videotex.
 DEFAULT_SYSTEM_PROMPT = """Tu es un assistant concis et utile.
-Réponds en français.
-Tes réponses seront affichées sur un Minitel (écran 40 colonnes).
-Sois bref et va à l'essentiel."""
+Reponds en francais.
+Tes reponses seront affichees sur un Minitel 1 (ecran 40 colonnes, liaison
+serie 1200 bauds, mode Videotex ASCII 7 bits).
+N'utilise PAS d'accents ni de caracteres speciaux : ecris "e" au lieu de
+"e accent aigu", "a" au lieu de "a accent grave", "c" au lieu de "c cedille",
+"oe" au lieu de la ligature, etc.
+N'utilise PAS d'emoji, de guillemets typographiques, de tirets cadratins.
+Reponses courtes : chaque caractere coute ~8 ms a afficher (debit 120 c/s)."""
 
-# Configurations série à tester (ordre de priorité)
+# Configuration serie unique pour Minitel 1 NFZ 201 : 1200 7E1.
+# Toute autre vitesse ou format est hors-spec pour ce modele.
 SERIAL_CONFIGS = [
     {"baud": 1200, "bytesize": 7, "parity": "E", "stopbits": 1, "label": "1200 7E1"},
-    {"baud": 4800, "bytesize": 7, "parity": "E", "stopbits": 1, "label": "4800 7E1"},
-    {"baud": 1200, "bytesize": 8, "parity": "N", "stopbits": 1, "label": "1200 8N1"},
-    {"baud": 4800, "bytesize": 8, "parity": "N", "stopbits": 1, "label": "4800 8N1"},
-    {"baud": 9600, "bytesize": 7, "parity": "E", "stopbits": 1, "label": "9600 7E1"},
-    {"baud": 9600, "bytesize": 8, "parity": "N", "stopbits": 1, "label": "9600 8N1"},
-    {"baud": 300, "bytesize": 7, "parity": "E", "stopbits": 1, "label": "300 7E1"},
-    {"baud": 2400, "bytesize": 7, "parity": "E", "stopbits": 1, "label": "2400 7E1"},
-    {"baud": 1200, "bytesize": 7, "parity": "N", "stopbits": 1, "label": "1200 7N1"},
-    {"baud": 4800, "bytesize": 7, "parity": "N", "stopbits": 1, "label": "4800 7N1"},
 ]
 
 
@@ -70,9 +70,38 @@ SERIAL_CONFIGS = [
 # Utilitaires
 # ============================================================================
 
-def sanitize_latin1(text: str) -> str:
-    """Convertit le texte pour affichage latin-1, remplace les caractères non supportés."""
-    return text.encode("latin-1", errors="replace").decode("latin-1")
+# Caracteres qui ne se decomposent pas proprement via NFKD : on les mappe a la main.
+_TRANSLIT_TABLE = {
+    "œ": "oe", "Œ": "OE",
+    "æ": "ae", "Æ": "AE",
+    "ß": "ss",
+    "€": "EUR", "£": "GBP", "¥": "YEN", "¢": "c",
+    "«": '"', "»": '"',
+    "“": '"', "”": '"', "„": '"',
+    "‘": "'", "’": "'", "‚": "'", "′": "'",
+    "–": "-", "—": "-", "−": "-",
+    "…": "...", "·": ".", "•": "*",
+    "°": "o", "²": "2", "³": "3", "¹": "1",
+    "½": "1/2", "¼": "1/4", "¾": "3/4",
+    "©": "(c)", "®": "(r)", "™": "(tm)",
+    " ": " ", " ": " ", " ": " ",
+    "→": "->", "←": "<-", "↑": "^", "↓": "v",
+}
+
+
+def to_ascii_7bit(text: str) -> str:
+    """Translittere le texte vers de l'ASCII 7 bits pour le Minitel.
+
+    Le Minitel 1 NFZ 201 est en mode Videotex 7E1 : le 8e bit est utilise par
+    la parite, donc tout octet >= 0x80 est inecrivable. On decompose les
+    diacritiques (e accent aigu -> e + combining acute -> e) puis on filtre.
+    """
+    for src, dst in _TRANSLIT_TABLE.items():
+        text = text.replace(src, dst)
+    decomposed = unicodedata.normalize("NFKD", text)
+    # Filtrer les marques diacritiques combinantes (categorie Unicode Mn)
+    stripped = "".join(c for c in decomposed if unicodedata.category(c) != "Mn")
+    return stripped.encode("ascii", "replace").decode("ascii")
 
 
 def wrap_40(text: str, width: int = WRAP_COLS) -> List[str]:
@@ -481,10 +510,10 @@ class SerialMinitel:
         return self.serial is not None and self.serial.is_open
 
     def write(self, text: str):
-        """Écrit du texte brut sur le Minitel (encodage latin-1)."""
+        """Ecrit du texte brut sur le Minitel (ASCII 7 bits, mode Videotex)."""
         if not self.is_open():
             return
-        data = sanitize_latin1(text).encode("latin-1", errors="replace")
+        data = to_ascii_7bit(text).encode("ascii", errors="replace")
         if self.char_delay_ms > 0:
             for byte in data:
                 self.serial.write(bytes([byte]))
@@ -564,21 +593,14 @@ class SerialMinitel:
                         self.write("\x08 \x08")
                 continue
 
-            # Caractère imprimable
+            # Caractere imprimable ASCII 7 bits
             if 32 <= byte < 127:
                 char = chr(byte)
                 buffer.append(char)
                 if echo:
                     self.write(char)
-            elif byte >= 128:
-                # Caractères étendus latin-1
-                try:
-                    char = bytes([byte]).decode("latin-1")
-                    buffer.append(char)
-                    if echo:
-                        self.write(char)
-                except Exception:
-                    pass
+            # Tout octet >= 0x80 est une erreur de parite ou du bruit en 7E1 :
+            # on l'ignore silencieusement (pas un caractere clavier Minitel valide).
 
         return "".join(buffer) if buffer else None
 
@@ -623,10 +645,10 @@ class SimulatedMinitel:
         return self._is_open
 
     def write(self, text: str):
-        print(sanitize_latin1(text), end="", flush=True)
+        print(to_ascii_7bit(text), end="", flush=True)
 
     def writeln(self, line: str = ""):
-        print(sanitize_latin1(line))
+        print(to_ascii_7bit(line))
         if self.line_delay_ms > 0:
             time.sleep(self.line_delay_ms / 1000.0)
 
@@ -735,11 +757,12 @@ def run_serial_autoconfig(debug: bool = False) -> Optional[Dict[str, Any]]:
 
     print(f"\nPort sélectionné: {selected_port}")
     print("\n" + "-" * 40)
-    print("Test des configurations série...")
+    print("Test de la liaison serie en 1200 7E1...")
+    print("(seule config supportee par le Minitel 1 NFZ 201)")
     print("Regarde l'écran du Minitel!")
     print("-" * 40)
 
-    # 3. Test des configurations
+    # 3. Test de la configuration 1200 7E1 (unique config legale pour ce modele)
     import serial
 
     for config in SERIAL_CONFIGS:
@@ -768,7 +791,7 @@ def run_serial_autoconfig(debug: bool = False) -> Optional[Dict[str, Any]]:
         test_msg += "> "
 
         try:
-            ser.write(test_msg.encode("latin-1"))
+            ser.write(test_msg.encode("ascii"))
             time.sleep(0.1)
         except Exception as e:
             print(f"ERREUR écriture: {e}")
@@ -1183,7 +1206,7 @@ def run_shell(minitel, anthropic_client: AnthropicClientWrapper,
     minitel.writeln("  MINICLAUDE")
     session = session_store.get_session(session_id)
     if session and session["messages"]:
-        title_short = sanitize_latin1(session["title"])[:30]
+        title_short = to_ascii_7bit(session["title"])[:30]
         minitel.writeln(f"  {title_short}")
     minitel.writeln("  /help pour les commandes")
     minitel.writeln("=" * 40)
@@ -1263,7 +1286,7 @@ def run_shell(minitel, anthropic_client: AnthropicClientWrapper,
                         display_sessions = sessions[:9]
                         for i, s in enumerate(display_sessions, 1):
                             date_str = s["updated_at"][5:10].replace("-", "/")
-                            title = sanitize_latin1(s["title"])[:31]
+                            title = to_ascii_7bit(s["title"])[:31]
                             marker = "*" if s["id"] == session_id else " "
                             minitel.writeln(f"{i}{marker} {date_str} {title}")
                         minitel.writeln()
@@ -1280,7 +1303,7 @@ def run_shell(minitel, anthropic_client: AnthropicClientWrapper,
                                 config.save()
                                 history.load_from(session_messages)
                                 n = len(session_messages) // 2
-                                title_short = sanitize_latin1(selected["title"])[:20]
+                                title_short = to_ascii_7bit(selected["title"])[:20]
                                 minitel.writeln(f"Chat: {title_short}")
                                 minitel.writeln(f"{n} echanges charges.")
                             else:
