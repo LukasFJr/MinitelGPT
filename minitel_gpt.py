@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-minitel_gpt.py — ChatGPT sur Minitel via API OpenAI officielle
+minitel_gpt.py — Claude sur Minitel via API Anthropic
 
 Un seul fichier Python pour piloter un Minitel 1 (TRT / La Radiotechnique NFZ 201)
 en liaison série et l'utiliser comme terminal de chat.
@@ -10,7 +10,7 @@ Usage:
     python minitel_gpt.py [--simulate] [--port PORT] [--debug] [--no-stream]
 
 Dépendances:
-    pip install pyserial openai
+    pip install pyserial anthropic
 """
 
 import argparse
@@ -19,11 +19,13 @@ import os
 import sys
 import time
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Generator, List, Dict, Any
 
 # --- Configuration par défaut ---
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "claude-sonnet-4-6"
+MEMORY_MODEL  = "claude-haiku-4-5-20251001"
 WRAP_COLS = 40
 PAGE_LINES = 18
 LINE_DELAY_MS = 80
@@ -31,16 +33,18 @@ CHAR_DELAY_MS = 0  # 0 = désactivé
 MAX_HISTORY_TURNS = 20
 MAX_HISTORY_CHARS = 16000
 
-# Clé API en dur (laisser vide pour utiliser OPENAI_API_KEY)
+# Clé API en dur (laisser vide pour utiliser ANTHROPIC_API_KEY)
 # ATTENTION: Ne pas committer avec une vraie clé si repo public!
 HARDCODED_API_KEY = ""
 
 # Fichiers de configuration/données
 CONFIG_FILE = "minitel_config.json"
 HISTORY_FILE = "history.json"
-SYSTEM_PROFILE_FILE = "system_profile.txt"
+SYSTEM_PROFILE_FILE = "system_profile.md"
+MEMORY_FILE = "memory.md"
+CHAT_LOG_FILE = "chat_log.json"
 
-# Profil système par défaut si system_profile.txt absent
+# Profil système par défaut si system_profile.md absent
 DEFAULT_SYSTEM_PROMPT = """Tu es un assistant concis et utile.
 Réponds en français.
 Tes réponses seront affichées sur un Minitel (écran 40 colonnes).
@@ -169,9 +173,11 @@ class HistoryStore:
         except IOError as e:
             print(f"[ERREUR] Impossible de sauvegarder historique: {e}", file=sys.stderr)
 
-    def add(self, role: str, content: str):
+    def add(self, role: str, content: str, chat_log: Optional["ChatLogStore"] = None):
         self.messages.append({"role": role, "content": content})
         self._trim()
+        if chat_log is not None:
+            chat_log.append(role, content)
 
     def reset(self):
         self.messages = []
@@ -196,11 +202,54 @@ class HistoryStore:
 
 
 # ============================================================================
-# Classe OpenAIClientWrapper
+# Classe ChatLogStore
 # ============================================================================
 
-class OpenAIClientWrapper:
-    """Wrapper pour l'API OpenAI avec support streaming et fallback."""
+class ChatLogStore:
+    """Journal permanent de toutes les conversations (chat_log.json, jamais tronqué)."""
+
+    def __init__(self, filepath: str = CHAT_LOG_FILE):
+        self.filepath = Path(filepath)
+
+    def append(self, role: str, content: str):
+        """Ajoute un message au log avec timestamp ISO 8601 UTC."""
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "role": role,
+            "content": content,
+        }
+        entries = self._load_all()
+        entries.append(entry)
+        try:
+            with open(self.filepath, "w", encoding="utf-8") as f:
+                json.dump(entries, f, indent=2, ensure_ascii=False)
+        except IOError as e:
+            print(f"[WARN] Impossible d'écrire chat_log: {e}", file=sys.stderr)
+
+    def get_since(self, since_iso: Optional[str]) -> List[Dict]:
+        """Retourne les messages postérieurs à since_iso (None = tous)."""
+        entries = self._load_all()
+        if not since_iso:
+            return entries
+        return [e for e in entries if e.get("timestamp", "") > since_iso]
+
+    def _load_all(self) -> List[Dict]:
+        if not self.filepath.exists():
+            return []
+        try:
+            with open(self.filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+        except (json.JSONDecodeError, IOError):
+            return []
+
+
+# ============================================================================
+# Classe AnthropicClientWrapper
+# ============================================================================
+
+class AnthropicClientWrapper:
+    """Wrapper pour l'API Anthropic avec support streaming."""
 
     def __init__(self, api_key: Optional[str] = None, debug: bool = False):
         self.debug = debug
@@ -208,98 +257,69 @@ class OpenAIClientWrapper:
         self._init_client(api_key)
 
     def _init_client(self, api_key: Optional[str] = None):
-        # Priorité: clé passée > HARDCODED > env var
-        key = api_key or HARDCODED_API_KEY or os.environ.get("OPENAI_API_KEY")
+        key = api_key or HARDCODED_API_KEY or os.environ.get("ANTHROPIC_API_KEY")
         if not key:
-            raise ValueError("Clé API OpenAI non trouvée. Définir OPENAI_API_KEY ou HARDCODED_API_KEY.")
-
+            raise ValueError(
+                "Clé API Anthropic non trouvée. Définir ANTHROPIC_API_KEY."
+            )
         try:
-            from openai import OpenAI
-            self.client = OpenAI(api_key=key)
-            self._use_new_api = True
+            import anthropic
+            self.client = anthropic.Anthropic(api_key=key)
         except ImportError:
-            # Fallback vers ancienne API si nécessaire
-            try:
-                import openai
-                openai.api_key = key
-                self._use_new_api = False
-                self.client = openai
-            except ImportError:
-                raise ImportError("Module openai non installé. Exécuter: pip install openai")
+            raise ImportError("Module anthropic non installé. Exécuter: pip install anthropic")
 
-    def call(self, messages: List[Dict[str, str]], model: str = DEFAULT_MODEL,
-             stream: bool = True) -> Generator[str, None, None]:
+    def call(self, messages: List[Dict[str, str]], system_prompt: str = "",
+             model: str = DEFAULT_MODEL, stream: bool = True) -> Generator[str, None, None]:
         """
-        Appelle l'API OpenAI et retourne un générateur de chunks de texte.
-        Si stream=False, retourne le texte complet en un seul chunk.
+        Appelle l'API Anthropic et retourne un générateur de chunks de texte.
+        messages: uniquement les rôles user/assistant (pas de system ici).
+        system_prompt: injecté comme paramètre séparé system=.
         """
         max_retries = 3
         retry_delay = 2
 
         for attempt in range(max_retries):
             try:
-                if self._use_new_api:
-                    yield from self._call_new_api(messages, model, stream)
+                if stream:
+                    yield from self._call_streaming(messages, system_prompt, model)
                 else:
-                    yield from self._call_legacy_api(messages, model, stream)
+                    yield from self._call_blocking(messages, system_prompt, model)
                 return
             except Exception as e:
                 error_str = str(e).lower()
-                # Erreurs transitoires: retry
-                if any(x in error_str for x in ["rate limit", "timeout", "connection", "503", "502"]):
+                if any(x in error_str for x in
+                       ["rate limit", "timeout", "connection", "503", "502", "overloaded"]):
                     if attempt < max_retries - 1:
                         if self.debug:
                             log_debug(f"Erreur transitoire, retry dans {retry_delay}s: {e}")
                         time.sleep(retry_delay)
                         retry_delay *= 2
                         continue
-                # Erreur fatale ou dernier retry
                 if self.debug:
-                    log_debug(f"Erreur API OpenAI: {e}")
+                    log_debug(f"Erreur API Anthropic: {e}")
                 yield f"[Erreur API: {type(e).__name__}]"
                 return
 
-    def _call_new_api(self, messages: List[Dict[str, str]], model: str,
-                      stream: bool) -> Generator[str, None, None]:
-        """Appel avec le nouveau SDK OpenAI (>=1.0)."""
-        if stream:
-            response = self.client.chat.completions.create(
-                model=model,
-                messages=messages,
-                stream=True
-            )
-            for chunk in response:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
-        else:
-            response = self.client.chat.completions.create(
-                model=model,
-                messages=messages,
-                stream=False
-            )
-            if response.choices:
-                yield response.choices[0].message.content or ""
+    def _call_streaming(self, messages: List[Dict[str, str]], system_prompt: str,
+                        model: str) -> Generator[str, None, None]:
+        with self.client.messages.stream(
+            model=model,
+            max_tokens=1024,
+            system=system_prompt,
+            messages=messages,
+        ) as stream:
+            for text in stream.text_stream:
+                yield text
 
-    def _call_legacy_api(self, messages: List[Dict[str, str]], model: str,
-                         stream: bool) -> Generator[str, None, None]:
-        """Fallback pour anciennes versions du SDK."""
-        if stream:
-            response = self.client.ChatCompletion.create(
-                model=model,
-                messages=messages,
-                stream=True
-            )
-            for chunk in response:
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                if "content" in delta:
-                    yield delta["content"]
-        else:
-            response = self.client.ChatCompletion.create(
-                model=model,
-                messages=messages,
-                stream=False
-            )
-            yield response["choices"][0]["message"]["content"]
+    def _call_blocking(self, messages: List[Dict[str, str]], system_prompt: str,
+                       model: str) -> Generator[str, None, None]:
+        response = self.client.messages.create(
+            model=model,
+            max_tokens=1024,
+            system=system_prompt,
+            messages=messages,
+        )
+        yield response.content[0].text
 
 
 # ============================================================================
@@ -687,6 +707,7 @@ def run_serial_autoconfig(debug: bool = False) -> Optional[Dict[str, Any]]:
                                 "char_delay_ms": CHAR_DELAY_MS,
                                 "model": DEFAULT_MODEL,
                                 "page_lines": PAGE_LINES,
+                                "last_memory_update": None,
                             }
 
                             print("\n" + "=" * 40)
@@ -885,25 +906,136 @@ def display_streaming(minitel, text_generator: Generator[str, None, None],
 
 
 # ============================================================================
-# Chargement du profil système
+# Gestion des fichiers de profil et de mémoire
 # ============================================================================
 
-def load_system_prompt() -> str:
-    """Charge le prompt système depuis system_profile.txt ou utilise le défaut."""
+def _ensure_default_files():
+    """Crée memory.md et system_profile.md avec contenu par défaut si absents.
+    Si system_profile.txt existe, migre son contenu vers system_profile.md."""
+    memory_path = Path(MEMORY_FILE)
+    if not memory_path.exists():
+        try:
+            memory_path.write_text("", encoding="utf-8")
+        except IOError:
+            pass
+
+    profile_path = Path(SYSTEM_PROFILE_FILE)
+    if not profile_path.exists():
+        # Migrer depuis system_profile.txt si disponible
+        old_profile = Path("system_profile.txt")
+        if old_profile.exists():
+            try:
+                content = old_profile.read_text(encoding="utf-8")
+                profile_path.write_text(content, encoding="utf-8")
+            except IOError:
+                try:
+                    profile_path.write_text(DEFAULT_SYSTEM_PROMPT, encoding="utf-8")
+                except IOError:
+                    pass
+        else:
+            try:
+                profile_path.write_text(DEFAULT_SYSTEM_PROMPT, encoding="utf-8")
+            except IOError:
+                pass
+
+
+def load_system_prompt_combined() -> str:
+    """Charge le prompt système combiné : system_profile.md + memory.md."""
+    # Charger le profil système
     profile_path = Path(SYSTEM_PROFILE_FILE)
     if profile_path.exists():
         try:
             content = profile_path.read_text(encoding="utf-8").strip()
-            if content:
-                return content
+            system_part = content if content else DEFAULT_SYSTEM_PROMPT
+        except IOError:
+            system_part = DEFAULT_SYSTEM_PROMPT
+    else:
+        system_part = DEFAULT_SYSTEM_PROMPT
+
+    # Charger la mémoire et l'ajouter si non vide
+    memory_path = Path(MEMORY_FILE)
+    memory_part = ""
+    if memory_path.exists():
+        try:
+            memory_content = memory_path.read_text(encoding="utf-8").strip()
+            if memory_content:
+                memory_part = f"\n\n# Mémoire personnelle\n{memory_content}"
         except IOError:
             pass
-    return DEFAULT_SYSTEM_PROMPT
+
+    return system_part + memory_part
 
 
 # ============================================================================
 # Boucle principale (shell)
 # ============================================================================
+
+def _run_memory_update(anthropic_client: "AnthropicClientWrapper",
+                       chat_log: "ChatLogStore",
+                       config: "ConfigStore",
+                       debug: bool = False):
+    """Analyse les nouveaux échanges via Haiku et met à jour memory.md."""
+    # 1. Lire la mémoire actuelle
+    memory_path = Path(MEMORY_FILE)
+    current_memory = ""
+    if memory_path.exists():
+        try:
+            current_memory = memory_path.read_text(encoding="utf-8").strip()
+        except IOError:
+            pass
+
+    # 2. Récupérer les nouveaux messages depuis la dernière mise à jour
+    last_update = config.get("last_memory_update", None)
+    new_entries = chat_log.get_since(last_update)
+
+    if not new_entries and not current_memory:
+        return
+
+    # 3. Formater la conversation pour Haiku
+    conversation_text = ""
+    for entry in new_entries:
+        role_label = "Utilisateur" if entry["role"] == "user" else "Assistant"
+        conversation_text += f"{role_label}: {entry['content']}\n\n"
+
+    # 4. Prompt pour Haiku
+    system_for_haiku = (
+        "Tu maintiens une mémoire personnelle concise d'un utilisateur. "
+        "Réponds uniquement avec le contenu Markdown mis à jour, sans commentaire ni explication. "
+        "Si aucune information pertinente n'est à retenir, réponds avec le contenu original inchangé."
+    )
+    user_message = (
+        f"Voici ma mémoire actuelle:\n\n"
+        f"{current_memory if current_memory else '(vide)'}\n\n"
+        f"Voici les nouvelles conversations depuis la dernière mise à jour:\n\n"
+        f"{conversation_text if conversation_text else '(aucune nouvelle conversation)'}\n\n"
+        f"Mets à jour la mémoire en Markdown pour refléter les informations importantes, "
+        f"préférences et contexte à retenir. Sois concis."
+    )
+
+    # 5. Appel Haiku (non-streaming)
+    response_text = ""
+    for chunk in anthropic_client.call(
+        messages=[{"role": "user", "content": user_message}],
+        system_prompt=system_for_haiku,
+        model=MEMORY_MODEL,
+        stream=False,
+    ):
+        response_text += chunk
+
+    if debug:
+        log_debug(f"Memory update: {response_text[:200]}")
+
+    # 6. Écrire la nouvelle mémoire
+    if response_text.strip():
+        try:
+            memory_path.write_text(response_text.strip(), encoding="utf-8")
+        except IOError as e:
+            raise IOError(f"Impossible d'écrire memory.md: {e}")
+
+    # 7. Mettre à jour le timestamp
+    config.set("last_memory_update", datetime.now(timezone.utc).isoformat())
+    config.save()
+
 
 def show_help(minitel):
     """Affiche l'aide des commandes."""
@@ -916,20 +1048,22 @@ def show_help(minitel):
 /model X - Changer pour X
 /debug   - Toggle debug RX
 /history_reset - Effacer historique
+/memory  - Mettre a jour memoire
 /nopage  - Toggle pagination
 /throttle N - Delai lignes (ms)
 """
     display_wrapped(minitel, help_text)
 
 
-def run_shell(minitel, openai_client: OpenAIClientWrapper,
+def run_shell(minitel, anthropic_client: AnthropicClientWrapper,
               config: ConfigStore, history: HistoryStore,
+              chat_log: ChatLogStore,
               debug: bool = False, stream: bool = True):
     """Boucle principale du shell Minitel."""
 
     model = config.get("model", DEFAULT_MODEL)
     page_lines = config.get("page_lines", PAGE_LINES)
-    system_prompt = load_system_prompt()
+    system_prompt = load_system_prompt_combined()
     debug_rx = debug
 
     minitel.clear()
@@ -1000,6 +1134,17 @@ def run_shell(minitel, openai_client: OpenAIClientWrapper,
                     history.reset()
                     minitel.writeln("Historique efface")
 
+                elif cmd == "/memory":
+                    minitel.writeln("Mise a jour memoire...")
+                    try:
+                        _run_memory_update(anthropic_client, chat_log, config, debug_rx)
+                        system_prompt = load_system_prompt_combined()
+                        minitel.writeln("Memoire mise a jour.")
+                    except Exception as e:
+                        minitel.writeln("Erreur mise a jour memoire.")
+                        if debug_rx:
+                            print(f"[ERREUR] memory update: {e}", file=sys.stderr)
+
                 elif cmd == "/nopage":
                     current = minitel.is_pagination_enabled()
                     minitel.set_pagination(not current)
@@ -1026,30 +1171,31 @@ def run_shell(minitel, openai_client: OpenAIClientWrapper,
 
                 continue
 
-            # Envoi à OpenAI
+            # Envoi à Anthropic
             minitel.writeln()
 
-            # Construire les messages
-            messages = [{"role": "system", "content": system_prompt}]
-            messages.extend(history.get_messages())
+            # Construire les messages (user/assistant uniquement, system est séparé)
+            messages = list(history.get_messages())
             messages.append({"role": "user", "content": user_input})
 
             try:
                 if stream:
                     response_text = display_streaming(
                         minitel,
-                        openai_client.call(messages, model=model, stream=True),
+                        anthropic_client.call(messages, system_prompt=system_prompt,
+                                              model=model, stream=True),
                         page_lines=page_lines
                     )
                 else:
                     response_text = ""
-                    for chunk in openai_client.call(messages, model=model, stream=False):
+                    for chunk in anthropic_client.call(messages, system_prompt=system_prompt,
+                                                       model=model, stream=False):
                         response_text += chunk
                     display_wrapped(minitel, response_text, page_lines=page_lines)
 
-                # Sauvegarder dans l'historique
-                history.add("user", user_input)
-                history.add("assistant", response_text)
+                # Sauvegarder dans l'historique (et le log permanent)
+                history.add("user", user_input, chat_log=chat_log)
+                history.add("assistant", response_text, chat_log=chat_log)
                 history.save()
 
             except Exception as e:
@@ -1074,7 +1220,7 @@ def run_shell(minitel, openai_client: OpenAIClientWrapper,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="MinitelGPT - ChatGPT sur Minitel via API OpenAI"
+        description="MinitelGPT - Claude sur Minitel via API Anthropic"
     )
     parser.add_argument("--simulate", action="store_true",
                         help="Mode simulation (stdin/stdout au lieu de série)")
@@ -1089,17 +1235,19 @@ def main():
     # Initialiser les stores
     config = ConfigStore()
     history = HistoryStore()
+    chat_log = ChatLogStore()
 
-    # Charger l'historique
+    # Charger l'historique et créer les fichiers par défaut
     history.load()
+    _ensure_default_files()
 
-    # Initialiser le client OpenAI
+    # Initialiser le client Anthropic
     try:
-        openai_client = OpenAIClientWrapper(debug=args.debug)
+        anthropic_client = AnthropicClientWrapper(debug=args.debug)
     except Exception as e:
-        print(f"[ERREUR] Impossible d'initialiser OpenAI: {e}", file=sys.stderr)
-        print("\nVérifiez que OPENAI_API_KEY est défini:", file=sys.stderr)
-        print("  export OPENAI_API_KEY='sk-...'", file=sys.stderr)
+        print(f"[ERREUR] Impossible d'initialiser Anthropic: {e}", file=sys.stderr)
+        print("\nVérifiez que ANTHROPIC_API_KEY est défini:", file=sys.stderr)
+        print("  export ANTHROPIC_API_KEY='sk-ant-...'", file=sys.stderr)
         sys.exit(1)
 
     # Mode simulation
@@ -1119,10 +1267,11 @@ def main():
             "model": DEFAULT_MODEL,
             "page_lines": PAGE_LINES,
             "line_delay_ms": 0,
+            "last_memory_update": None,
         }
 
         try:
-            run_shell(minitel, openai_client, config, history,
+            run_shell(minitel, anthropic_client, config, history, chat_log,
                       debug=args.debug, stream=not args.no_stream)
         except KeyboardInterrupt:
             print("\nAu revoir!")
@@ -1196,7 +1345,7 @@ def main():
         print("[INFO] Ctrl+C pour quitter")
 
         try:
-            result = run_shell(minitel, openai_client, config, history,
+            result = run_shell(minitel, anthropic_client, config, history, chat_log,
                                debug=args.debug, stream=not args.no_stream)
 
             if result == "reset":

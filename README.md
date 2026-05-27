@@ -1,8 +1,8 @@
-# MinitelGPT — ChatGPT sur Minitel (API OpenAI + série)
+# MinitelGPT — Claude sur Minitel (API Anthropic + série)
 
-Un pont série entre un Minitel 1 (TRT / La Radiotechnique NFZ 201) et l'API OpenAI. Tu tapes un prompt sur le clavier du Minitel, la réponse s'affiche sur l'écran.
+Un pont série entre un Minitel 1 (TRT / La Radiotechnique NFZ 201) et l'API Anthropic (Claude). Tu tapes un prompt sur le clavier du Minitel, la réponse s'affiche sur l'écran.
 
-Pas de scraping du site ChatGPT : uniquement l'API officielle OpenAI.
+Modèles utilisés : **Claude Sonnet 4.6** pour les conversations, **Claude Haiku** pour la mise à jour de mémoire.
 
 ---
 
@@ -10,18 +10,19 @@ Pas de scraping du site ChatGPT : uniquement l'API officielle OpenAI.
 
 **Ce que le script gère :**
 - Saisie de prompt via le clavier du Minitel (liaison série)
-- Envoi à l'API OpenAI et affichage de la réponse
+- Envoi à l'API Anthropic et affichage de la réponse en streaming
 - Wrap 40 colonnes, encodage latin-1
 - Retours ligne `\r\n` compatibles Vidéotex
 - Throttling pour éviter la perte de caractères
 - Pagination ("— suite — appuie sur une touche")
 - Auto-configuration série au premier lancement
-- Historique local (`history.json`)
-- Profil système local (`system_profile.txt`) pour personnaliser le style de l'assistant
+- Historique local roulant (`history.json`) + journal permanent (`chat_log.json`)
+- Profil système (`system_profile.md`) pour personnaliser le style de l'assistant
+- Mémoire persistante (`memory.md`) mise à jour à la demande via `/memory`
 
 **Limitations :**
 
-Le script ne fait pas de graphismes Vidéotex, ne prétend pas être un terminal VT100/ANSI, et n'a pas accès à la mémoire de ton compte ChatGPT web (l'API OpenAI et le site web sont deux choses séparées).
+Le script ne fait pas de graphismes Vidéotex et ne prétend pas être un terminal VT100/ANSI.
 
 ---
 
@@ -42,12 +43,12 @@ Le script ne fait pas de graphismes Vidéotex, ne prétend pas être un terminal
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
-pip install pyserial openai
+pip install pyserial anthropic
 ```
 
-**2. Configurer la clé API OpenAI**
+**2. Configurer la clé API Anthropic**
 ```bash
-export OPENAI_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
 **3. (Optionnel) Lister les ports série disponibles**
@@ -90,24 +91,33 @@ L'invite côté Minitel est `> `. Tape ton prompt, appuie sur Entrée, lis la r�
 | `/clear` | Effacer l'écran (ou faux clear si non supporté) |
 | `/quit` | Quitter proprement |
 | `/reset` | Relancer l'assistant de configuration série |
-| `/model` | Changer de modèle (si supporté) |
-| `/history_reset` | Effacer l'historique local |
+| `/model` | Voir ou changer de modèle |
+| `/history_reset` | Effacer l'historique local de la session |
+| `/memory` | Analyser tous les échanges et mettre à jour la mémoire persistante |
 | `/debug` | Afficher les octets RX bruts côté Mac (debug bas niveau) |
 
 ---
 
 ## Personnalisation
 
-Pour personnaliser le comportement de l'assistant, crée un fichier `system_profile.txt` à la racine du projet :
+**Instructions permanentes — `system_profile.md`**  
+Créé automatiquement au premier lancement. Édite ce fichier pour personnaliser le comportement de l'assistant :
 
-```
+```markdown
 Tu es un assistant direct, pragmatique, légèrement sarcastique si utile.
 Réponds en français.
 Pas de blabla.
 Tu parles à Lukas.
 ```
 
-Ce fichier est injecté comme message système à chaque requête. L'historique des échanges est stocké dans `history.json` et persiste entre les sessions.
+**Mémoire persistante — `memory.md`**  
+Créé automatiquement (vide). Mis à jour par la commande `/memory` : le modèle Haiku analyse l'ensemble des échanges depuis la dernière mise à jour et synthétise les informations importantes. Cette mémoire est injectée dans chaque conversation.
+
+```markdown
+## Utilisateur
+- Prénom : Lukas
+- Développeur, aime Python et les projets rétro
+```
 
 ---
 
@@ -116,10 +126,12 @@ Ce fichier est injecté comme message système à chaque requête. L'historique 
 | Fichier | Rôle |
 |---|---|
 | `minitel_config.json` | Paramètres série, throttling, pagination |
-| `history.json` | Historique local des échanges |
-| `system_profile.txt` | Profil utilisateur (optionnel) |
+| `history.json` | Fenêtre de contexte roulante (20 derniers échanges) |
+| `chat_log.json` | Journal permanent de tous les échanges (jamais tronqué) |
+| `system_profile.md` | Instructions permanentes de l'assistant |
+| `memory.md` | Mémoire persistante mise à jour par `/memory` |
 
-À ajouter au `.gitignore` si le dépôt est public.
+Tous ces fichiers sont dans `.gitignore` car ils peuvent contenir des données personnelles.
 
 ---
 
