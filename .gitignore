@@ -28,6 +28,9 @@ ENV/
 # MinitelGPT runtime files (may contain sensitive data)
 minitel_config.json
 history.json
+chat_log.json
+memory.md
+system_profile.md
 
 # IDE
 .idea/
