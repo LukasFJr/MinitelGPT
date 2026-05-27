@@ -90,9 +90,11 @@ L'invite côté Minitel est `> `. Tape ton prompt, appuie sur Entrée, lis la r�
 | `/help` | Afficher l'aide |
 | `/clear` | Effacer l'écran (ou faux clear si non supporté) |
 | `/quit` | Quitter proprement |
+| `/new` | Démarrer un nouveau chat |
+| `/chat` | Lister les conversations passées et en reprendre une |
 | `/reset` | Relancer l'assistant de configuration série |
 | `/model` | Voir ou changer de modèle |
-| `/history_reset` | Effacer l'historique local de la session |
+| `/history_reset` | Effacer l'historique de la session courante |
 | `/memory` | Analyser tous les échanges et mettre à jour la mémoire persistante |
 | `/debug` | Afficher les octets RX bruts côté Mac (debug bas niveau) |
 
@@ -127,7 +129,8 @@ Créé automatiquement (vide). Mis à jour par la commande `/memory` : le modèl
 |---|---|
 | `minitel_config.json` | Paramètres série, throttling, pagination |
 | `history.json` | Fenêtre de contexte roulante (20 derniers échanges) |
-| `chat_log.json` | Journal permanent de tous les échanges (jamais tronqué) |
+| `sessions.json` | Toutes les conversations (non tronquées, navigation via `/chat`) |
+| `chat_log.json` | Journal global horodaté pour la mise à jour de mémoire |
 | `system_profile.md` | Instructions permanentes de l'assistant |
 | `memory.md` | Mémoire persistante mise à jour par `/memory` |
 
