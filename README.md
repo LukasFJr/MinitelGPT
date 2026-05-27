@@ -9,9 +9,9 @@ Modèles utilisés : **Claude Sonnet 4.6** pour les conversations, **Claude Haik
 ## Fonctionnalités
 
 **Ce que le script gère :**
-- Saisie de prompt via le clavier du Minitel (liaison série)
+- Saisie de prompt via le clavier du Minitel (liaison série 1200 7E1)
 - Envoi à l'API Anthropic et affichage de la réponse en streaming
-- Wrap 40 colonnes, encodage latin-1
+- Wrap 40 colonnes, translittération ASCII 7 bits (accents `é`→`e`, ligatures, etc.)
 - Retours ligne `\r\n` compatibles Vidéotex
 - Throttling pour éviter la perte de caractères
 - Pagination ("— suite — appuie sur une touche")
@@ -68,14 +68,16 @@ python minitel_gpt.py
 Au premier lancement (ou via `/reset`), le script :
 
 1. Liste les ports disponibles (`/dev/cu.usbserial-*`, `/dev/cu.usbmodem*`)
-2. Teste plusieurs combinaisons de baud rate et de format
-3. Envoie un écran de test :
+2. Te demande de choisir le port
+3. Ouvre le port en **1200 bauds 7E1** (seule config supportée par le Minitel 1 NFZ 201) et envoie un écran de test :
 ```
-TEST 1200 7E1 : SI TU LIS CA, TAPE y PUIS ENTREE
+TEST 1200 7E1
+SI TU LIS CECI
+TAPE y PUIS ENTREE
 ```
 4. Si tu tapes `y` + Entrée, la config est validée et sauvegardée dans `minitel_config.json`
 
-Si rien ne s'affiche, laisse tourner — le script cycle automatiquement à travers toutes les combinaisons possibles.
+Si rien ne s'affiche, c'est un problème côté câble ou port (le script ne cycle pas sur d'autres vitesses : un Minitel 1 ne parle qu'en 1200 7E1).
 
 ---
 
@@ -147,7 +149,7 @@ Tous ces fichiers sont dans `.gitignore` car ils peuvent contenir des données p
 - Active `/debug` — si aucun octet RX ne remonte, le câble est probablement incompatible ou les niveaux sont inversés
 
 **Caractères illisibles / hiéroglyphes**
-- Mauvais format série (7E1 vs 8N1)
+- Le port n'est pas ouvert en 7E1 (vérifier `minitel_config.json` : `bytesize=7, parity="E", stopbits=1`)
 - Relancer `/reset`
 
 **Entrée / backspace ne fonctionnent pas**
